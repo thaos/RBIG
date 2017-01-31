@@ -7,6 +7,8 @@ library(cramer)
 library(lpSolve)
 library(memoise)
 library(amap)
+library(scales)
+library(sn)
 
 entropy_mm <- function(x, nbins=sqrt(length(x))){  
     dx <- discretize(x, nbins)
@@ -18,7 +20,7 @@ entropy_mm <- function(x, nbins=sqrt(length(x))){
 compute_tol_h0 <- function(nrow, ncol, probs=0.975,  n=1000){
   nbins <- sqrt(nrow)
   sim <- function(){
-    x <- matrix(rnorm(nrow * ncol), ncol=ncol(dat))
+    x <- matrix(rnorm(nrow * ncol), ncol=ncol)
     mnegent <- apply(x, 2, entropy_mm)
     sum(mnegent)
   }
@@ -84,6 +86,33 @@ MI_RBIG_2016 <- function(dat, tol, N_lay=1000){
   ans <- list(dat=dat, MIs=delta_I, MI=sum(delta_I))
 }
 
+MI_RBIG_2016 <- function(dat, N_lay=1000){
+  DIM = dim(dat)
+  Nsamples = DIM[1]
+  nbins <- floor(sqrt(Nsamples))
+  DIM = DIM[2]
+  delta_I <- numeric(N_lay)
+  for (n in 1:N_lay){
+    # marginal gaussianization
+    p <- numeric(DIM)
+    for(d in 1:DIM){
+      margin  <-  marginal_gaussianization(dat[,d]);
+      dat[, d] <- margin$x_gauss   
+    }
+    dat_aux = dat;
+    # PCA rotation
+    C  <- cov(dat)
+    eig <- eigen(C);
+    V <- eig$vectors
+    #     V <- rRotationMatrix(1, ncol(C))
+    dat <- dat %*% V  
+    delta_I[n] = information_reduction_LT(dat,dat_aux, nbins=nbins);
+    rt <- roystonTest(dat, qqplot = FALSE)
+    hzt <- hzTest(dat, qqplot = FALSE)
+    if (runif(1)< max(rt@p.value, hzt@p.value)) break
+  }
+  ans <- list(dat=dat, MIs=delta_I, MI=sum(delta_I))
+}
 # information_reduction_LT <- function(X, Y, tol_d, tol_m, nbins){
 information_reduction_LT <- function(X, Y, tol, nbins){
   #   should discretize first
@@ -118,6 +147,13 @@ information_reduction_LT <- function(X, Y, tol, nbins){
   I
 } 
 
+information_reduction_LT <- function(X, Y, nbins){
+  #   should discretize first
+  hx <- apply(X, 2, function(x)entropy.MillerMadow(discretize(x, nbins), unit="log2") + log2(diff(range(x))/nbins))
+  hy <- apply(Y, 2, function(y)entropy.MillerMadow(discretize(y, nbins), unit="log2") + log2(diff(range(y))/nbins))
+  I <- sum(hy - hx)
+} 
+
 marginal_gaussianization <- function(x){
   #   x_order <- order(x)
   #   x_cdfk <- kCDF(x, xgrid=x)
@@ -138,7 +174,7 @@ knn_entropy_1D <- function(x){
  #  mean(log(N*x_diff)) -  digamma(1) + log(1)
 }
 
-cond_MI <- function(dat, x_ind, y_ind, c_ind=integer(0)){
+cond_MI_r <- function(dat, x_ind, y_ind, c_ind=integer(0)){
   if(length(c_ind) == 0){
     ans <- MI_RBIG_2016(dat[, c(x_ind, y_ind)])$MI
   }else{ 
@@ -151,25 +187,25 @@ cond_MI <- function(dat, x_ind, y_ind, c_ind=integer(0)){
   ans
 }
 
-# cond_MI <- function(dat, x_ind, y_ind, c_ind=integer(0)){
-#   if(length(c_ind) == 0){
-#     ans <- RBIG_r(dat[, c(x_ind, y_ind)])
-#   }else{ 
-#     ans <- RBIG_r(dat[, c(x_ind, y_ind, c_ind)])
-#     ans <- ans - RBIG_r(dat[, c(x_ind, c_ind)])
-#     ans <- ans - RBIG_r(dat[, c(y_ind, c_ind)])
-#     if(length(c_ind) > 1)
-#       ans <- ans + RBIG_r(dat[, c_ind])
-#   } 
-#   ans
-# }
+cond_MI_m <- function(dat, x_ind, y_ind, c_ind=integer(0)){
+  if(length(c_ind) == 0){
+    ans <- RBIG_r(dat[, c(x_ind, y_ind)])
+  }else{ 
+    ans <- RBIG_r(dat[, c(x_ind, y_ind, c_ind)])
+    ans <- ans - RBIG_r(dat[, c(x_ind, c_ind)])
+    ans <- ans - RBIG_r(dat[, c(y_ind, c_ind)])
+    if(length(c_ind) > 1)
+      ans <- ans + RBIG_r(dat[, c_ind])
+  } 
+  ans
+}
 
 # boot_mi <- function(dat, x_ind, y_ind, c_ind=integer(0)){
 #   if(length(c_ind) == 0){
 sample_mi <- function(dat, x_ind, y_ind){
   dat <- dat[,c(x_ind, y_ind)]
   dat[, 1] <- sample(dat[,1])
-  dat[, 2] <- sample(dat[,2])
+  #   dat[, 2] <- sample(dat[,2])
   #   plot(hexplom(dat))
   dat
 }
@@ -187,71 +223,67 @@ sample_cmi <- function(dat, x_ind, y_ind, c_ind){
   #   plot(hexplom(dat_b))
   dat_b 
 }
+sample_cmi <- function(dat, x_ind, y_ind, c_ind){
+  cset <- dat[, 3:ncol(dat), drop=FALSE]
+  sdd <- apply(cset, 2, function(x) sd(c(dist(x))))
+  sdd <- sapply(sdd, function(x)rnorm(nrow(dat),sd=.01*sdd))
+  cset <- cset + sdd 
+  P <- linear_permutation(dist(cset))
+  dat <-  cbind(P%*%dat[, 1], dat[, 2:ncol(dat)])
+  dat
+}
 
-boot_mi <- function(dat, x_ind, y_ind){
+sample_cmi <- function(dat, x_ind, y_ind, c_ind, c_dist){
+  sdd <- sd(c(c_dist))
+  c_dist <- c_dist + rnorm(length(c_dist), sd=.1*sdd) 
+  P <- linear_permutation(c_dist)
+  dat <-  cbind(P%*%dat[, 1], dat[, 2:ncol(dat)])
+  dat
+}
+
+
+
+boot_mi <- function(dat, x_ind, y_ind, cond_MI=cond_MI_r){
   dat <- sample_mi(dat, x_ind, y_ind)  
   cond_MI(dat, 1, 2)
 } 
 
-boot_diff_mi <- function(dat, x_ind, y_ind){
-  dat <- dat[, c(x_ind, y_ind)]
-  dat <- dat[sample.int(nrow(dat), replace=TRUE), ]
-  mi <- cond_MI(dat, 1, 2) 
-  dat <- sample_mi(dat, 1, 2)  
-  mi0 <- cond_MI(dat, 1, 2) 
-  mi - mi0 
-}
-
-boot_diff_cmi <- function(dat, x_ind, y_ind, c_ind){
-  dat <- dat[, c(x_ind, y_ind, c_ind)]
-  dat <- dat[sample.int(nrow(dat), replace=TRUE), ]
-  mi <- cond_MI(dat, 1, 2, 3:ncol(dat)) 
-  dat <- sample_cmi(dat, 1, 2, 3:ncol(dat))  
-  mi0 <- cond_MI(dat, 1, 2, 3:ncol(dat)) 
-  mi - mi0 
-}
-
-boot_cmi <- function(dat, x_ind, y_ind, c_ind){
-  dat <- sample_cmi(dat, x_ind, y_ind, c_ind)  
+boot_cmi <- function(dat, x_ind, y_ind, c_ind, c_dist, cond_MI=cond_MI_r){
+  dat <- sample_cmi(dat, x_ind, y_ind, c_ind, c_dist)  
   cond_MI(dat, 1, 2, 3:ncol(dat))
 } 
 
-nboot_cmi <- function(n,dat, x_ind, y_ind, c_ind=numeric(0)){
+nboot_cmi <- function(n,dat, x_ind, y_ind, c_ind=numeric(0), cond_MI=cond_MI_r){
+  pb <- txtProgressBar(min = 0, max = n, style = 3)
   if(length(c_ind) == 0)
-    ans <- unlist(lapply(seq.int(n), function(x){cat("*"); boot_mi(dat, x_ind, y_ind)}))
-  else
-    ans <- unlist(lapply(seq.int(n), function(x){cat("*"); boot_cmi(dat, x_ind, y_ind, c_ind)}))
-  cat("\n")
+    ans <- unlist(lapply(seq.int(n), function(i){setTxtProgressBar(pb, i); boot_mi(dat, x_ind, y_ind, cond_MI)}))
+  else{
+    c_dist <- dist(dat[, 3:ncol(dat), drop=FALSE])
+    ans <- unlist(lapply(seq.int(n), function(i){setTxtProgressBar(pb, i); boot_cmi(dat, x_ind, y_ind, c_ind, c_dist, cond_MI)}))
+  }
+  close(pb)
   ans
 }
 
-nboot_diff_cmi <- function(n,dat, x_ind, y_ind, c_ind=numeric(0)){
-  dat <- as.matrix(dat)
-  if(length(c_ind) == 0)
-    ans <- unlist(lapply(seq.int(n), function(x){cat(x, "*"); boot_diff_mi(dat, x_ind, y_ind)}))
-  else
-    ans <- unlist(lapply(seq.int(n), function(x){cat(x, "*"); boot_diff_cmi(dat, x_ind, y_ind, c_ind)}))
-  cat("\n")
-  ans
-}
-#bsample <-  nboot_diff_cmi(50, dat, 1, 2, 3)
-#bsample <-  nboot_diff_cmi(50, dat, 1, 3, 2)
-
-cmi_btest <- function(nboot ,dat, x_ind, y_ind, c_ind=numeric(0)){
+cmi_btest <- function(nboot ,dat, x_ind, y_ind, c_ind=numeric(0), cond_MI=cond_MI_r){
   cmi <- cond_MI(dat, x_ind, y_ind, c_ind)
-  ncmi <- nboot_cmi(nboot, dat, x_ind, y_ind, c_ind)
+  #print(cmi)
+  ncmi <- nboot_cmi(nboot, dat, x_ind, y_ind, c_ind, cond_MI)
   #   browser()
-  1 - sum(cmi > ncmi) / nboot
+  df <- data.frame(stat=c(cmi, ncmi), type=rep(c("H1","H0"), c(1,nboot)))
+    plot(ggplot(data=df, aes(x=stat, fill=type, color=type)) + geom_histogram(aes(y=..density..),alpha=0.5, position="identity", bins=30)+ggtitle(paste("x=",x_ind[1], "y=", y_ind[1], " S=", paste(c_ind, collapse=TRUE)))+theme(aspect.ratio=1/3))
+  #p.value <- 1 - rank(c(cmi, ncmi))[1]/(length(ncmi) + 1)
+  # p.value <- 1 - kCDF(ncmi, xgrid=cmi)
+  p.value <- 1 - rank(c(cmi, ncmi))[1]/(length(ncmi) + 1)
+  print(p.value)
+#  p.value <- 1 - psn(cmi, dp=coef(selm(ncmi~1), "dp"))
+#  print(p.value)
+  p.value
 }
 
-diff_cmi_btest <- function(nboot ,dat, x_ind, y_ind, c_ind=numeric(0)){
-  n_diffcmi <- nboot_cmi(nboot, dat, x_ind, y_ind, c_ind)
-  #   browser()
-  t.test(n_diffcmi)$p.value
-}
 
 cmi_btest_pc <- function(x, y, S, suffStat){
-  cmi_btest(suffStat$nboot, suffStat$dat, x, y, S)
+  cmi_btest(suffStat$nboot, suffStat$dat, x, y, S, cond_MI=suffStat$cond_MI)
 }
 
 # diff_cmi_btes <- function(nboot, dat, x_ind, y_ind, c_ind)
@@ -383,9 +415,14 @@ KCIPT <- function(dat, xy_ind, c_ind=numeric(0),  dist, B, b, M){
     omega1 <- omega[idx, ]
     omega2 <- omega[-idx, ]
     P <- linear_permutation(dist(omega2[, 3:ncol(omega2)]))
-    omega21 <-  cbind(P%*%omega2[, 1], omega2[, 2:ncol(omega2)])
-    omega22 <-  cbind(omega2[, 1], P%*%omega2[, 2], omega2[, 3:ncol(omega2)])
-    omega2 <- rbind(omega21, omega22)[sample.int(nrow(omega1)), ]
+    if(i < B/2){
+      omega2 <-  cbind(P%*%omega2[, 1], omega2[, 2:ncol(omega2)])
+    }else{
+      omega2 <-  cbind(omega2[, 1], P%*%omega2[, 2], omega2[, 3:ncol(omega2)])
+    } 
+    #     omega21 <-  cbind(P%*%omega2[, 1], omega2[, 2:ncol(omega2)])
+    #     omega22 <-  cbind(omega2[, 1], P%*%omega2[, 2], omega2[, 3:ncol(omega2)])
+    #     omega2 <- rbind(omega21, omega22)[sample.int(nrow(omega1)), ]
     MMD[i] <- cramer.test_simple(omega1, omega2)
     omega <- rbind(omega1, omega2)
     for( j in 1:b){
@@ -502,9 +539,9 @@ RBIG_kcipt <- function(dat, xy_ind, c_ind=numeric(0),  dist, B, b, M){
     omega1 <- omega[idx, ]
     omega2 <- omega[-idx, ]
     P <- linear_permutation(dist(omega2[, 3:ncol(omega2)]))
-    omega21 <-  cbind(P%*%omega2[, 1], omega2[, 2:ncol(omega2)])
-    omega22 <-  cbind(omega2[, 1], P%*%omega2[, 2], omega2[, 3:ncol(omega2)])
-    omega2 <- rbind(omega21, omega22)[sample.int(nrow(omega1)), ]
+    #     omega21 <-  cbind(P%*%omega2[, 1], omega2[, 2:ncol(omega2)])
+    #     omega22 <-  cbind(omega2[, 1], P%*%omega2[, 2], omega2[, 3:ncol(omega2)])
+    #     omega2 <- rbind(omega21, omega22)[sample.int(nrow(omega1)), ]
     MMD[i] <- cond_MI(omega1, 1, 2, c_ind=3:ncol(omega1))
     omega <- rbind(omega1, omega2)
     for( j in 1:b){
@@ -528,30 +565,129 @@ RBIG_kcipt <- function(dat, xy_ind, c_ind=numeric(0),  dist, B, b, M){
 }
 # RBIG_kcipt(head(dat, 700), 1:2, 3, dist, 10, 20, 100)
 
-RBIG_hist <- function(dat, xy_ind, c_ind=numeric(0),  dist, B){
+RBIG_hist <- function(dat, xy_ind, c_ind=numeric(0),  dist, B, to_plot=FALSE, cond_MI=cond_MI_r){
   stat <- numeric(B)
   stat_h0 <- numeric(B)
   dat <- as.matrix(dat)
   dat <- dat[, c(xy_ind, c_ind)]
+  pb <- txtProgressBar(min = 0, max = B, style = 3)
   for( i in 1:B){
     omega <- dat
     idx <- sample.int(nrow(omega), round(nrow(omega)/2))
     omega1 <- omega[idx, ]
     omega2 <- omega[-idx, ]
-    P <- linear_permutation(dist(omega2[, 3:ncol(omega2)]))
-    omega21 <-  cbind(P%*%omega2[, 1], omega2[, 2:ncol(omega2)])
-    omega22 <-  cbind(omega2[, 1], P%*%omega2[, 2], omega2[, 3:ncol(omega2)])
-    omega2 <- rbind(omega21, omega22)[sample.int(nrow(omega1)), ]
-    stat[i] <- cond_MI(omega1, 1, 2, c_ind=3:ncol(omega1))
-    stat_h0[i] <- cond_MI(omega2, 1, 2, c_ind=3:ncol(omega1))
-    cat("*")
+    if(length(c_ind) != 0){
+      P <- linear_permutation(dist(omega2[, 3:ncol(omega2)]))
+      if(i < B/2){
+	omega2 <-  cbind(P%*%omega2[, 1], omega2[, 2:ncol(omega2)])
+      }else{
+	omega2 <-  cbind(omega2[, 1], P%*%omega2[, 2], omega2[, 3:ncol(omega2)])
+      } 
+      stat[i] <- cond_MI(omega1, 1, 2, c_ind=3:ncol(omega1))
+      stat_h0[i] <- cond_MI(omega2, 1, 2, c_ind=3:ncol(omega1))
+    } else{
+      omega2[, 1] <- omega2[sample.int(nrow(omega2)), 1] 
+      stat[i] <- cond_MI(omega1, 1, 2)
+      stat_h0[i] <- cond_MI(omega2, 1, 2)
+    }
+    #     omega21 <-  cbind(P%*%omega2[, 1], omega2[, 2:ncol(omega2)])
+    #     omega22 <-  cbind(omega2[, 1], P%*%omega2[, 2], omega2[, 3:ncol(omega2)])
+    #     omega2 <- rbind(omega21, omega22)[sample.int(2*nrow(omega2), length(idx)), ]
+    #     cat("*")
+    setTxtProgressBar(pb, i)
   }
-  cat("\n")
-  hist(stat)
-  par(new=TRUE)
-  hist(stat_h0)
+  close(pb)
+  #   cat("\n")
+  #   hist(stat)
+  #   par(new=TRUE)
+  #   hist(stat_h0)
+  if(to_plot){
+    df <- data.frame(stat=c(stat, stat_h0), type=rep(c("H1","H0"), c(B,B)))
+    plot(ggplot(data=df, aes(x=stat, fill=type, color=type)) + geom_histogram(alpha=0.5, position="identity", bins=30)+ggtitle(paste("x=",xy_ind[1], "y=", xy_ind[2], " S=", c_ind))+theme(aspect.ratio=1/3))
+  }
   data.frame(stat, stat_h0)
 }
-rbig_hist_12_34 <- RBIG_hist(head(dat, 700), 1:2, 3:4, dist, 200)
-rbig_hist_45_3 <- RBIG_hist(head(dat, 700), 4:5, 3, dist, 200)
-rbig_hist_12_3 <- RBIG_hist(head(dat, 700), 1:2, 3, dist, 200)
+# rbig_hist_12_34 <- RBIG_hist(head(dat, 700), 1:2, 3:4, dist, 200)
+# rbig_hist_45_3 <- RBIG_hist(head(dat, 700), 4:5, 3, dist, 200)
+# rbig_hist_12_3 <- RBIG_hist(head(dat, 700), 1:2, 3, dist, 200)
+
+KCIPT_test <- function(dat, xy_ind, c_ind=numeric(0),  dist, B, to_plot=FALSE ){
+  stat_h01 <- numeric(B)
+  stat_h11 <- numeric(B)
+  stat_h02 <- numeric(B)
+  stat_h12 <- numeric(B)
+  samples <- numeric(B)
+  dat <- as.matrix(dat)
+  dat <- dat[, c(xy_ind, c_ind)]
+  pb <- txtProgressBar(min = 0, max = B, style = 3)
+  for( i in 1:B){
+    omega <- dat
+    idx <- sample.int(nrow(omega), round(nrow(omega)/2))
+    omega1 <- omega[idx, ]
+    omega2 <- omega[-idx, ]
+    cpermute <- function(omega){
+      if(length(c_ind) != 0){
+	P <- linear_permutation(dist(omega[, 3:ncol(omega)]))
+	if(i < B/2){
+	  omega <-  cbind(P%*%omega[, 1], omega[, 2:ncol(omega)])
+	}else{
+	  omega <-  cbind(omega[, 1], P%*%omega[, 2], omega[, 3:ncol(omega)])
+	} 
+      }else{
+	omega <- omega 
+	omega[, 1] <- omega[sample.int(nrow(omega)), 1] 
+      }
+      omega
+    }
+    omega2p <- cpermute(omega2)
+    omega1p <- cpermute(omega1)
+    stat_h01[i] <- cramer.test_simple(omega1p, omega2p)
+    stat_h11[i] <- cramer.test_simple(omega1, omega2p)
+    #     stat_h02[i] <- cramer.test_simple(omega1, omega2)
+    stat_h12[i] <- cramer.test_simple(omega1p, omega2)
+    #     cat("*")
+    setTxtProgressBar(pb, i)
+  }
+  close(pb)
+  stat_h1 <- c(stat_h11, stat_h12)
+  stat_h0 <- c(stat_h01)
+  #   stat_h0 <- c(stat_h01, stat_h02)
+  if(to_plot){
+    df <- data.frame(stat=c(stat_h1, stat_h0), type=rep(c("H1","H0"), c(2*B,B)))
+    plot(ggplot(data=df, aes(x=stat, fill=type, color=type)) + geom_histogram(aes(y=0.1*..density..), alpha=0.5, position="identity", binwidth=0.1)+ggtitle(paste("x=",xy_ind[1], "y=", xy_ind[2], " S=", c_ind))+theme(aspect.ratio=1/3))
+  }
+  list(stat_h0, stat_h1)
+}
+
+RBIG_simple <- function(dat, xy_ind, c_ind=numeric(0),  dist, B, to_plot=FALSE){
+  stat_h0 <- numeric(B)
+  dat <- as.matrix(dat)
+  dat <- dat[, c(xy_ind, c_ind)]
+  pb <- txtProgressBar(min = 0, max = B, style = 3)
+  if(length(c_ind) != 0){
+    stat <- cond_MI(dat, 1, 2, c_ind=3:ncol(dat))
+    P <- linear_permutation(dist(dat[, 3:ncol(dat)]))
+    omega <-  cbind(P%*%dat[, 1], dat[, 2:ncol(dat)])
+    omega <-  rbind(omega, cbind(dat[, 1], P%*%dat[, 2], dat[, 3:ncol(dat)]))
+  }else{
+    stat <- cond_MI(dat, 1, 2)
+    omegab <- dat
+  }
+  for( i in 1:B){
+    if(length(c_ind) == 0){
+      omegab[, 1] <- dat[sample.int(nrow(dat)), 1] 
+      stat_h0[i] <- cond_MI(omegab, 1, 2)
+    }else{
+      omegab <- sample.int(n=nrow(omega), size=nrow(dat), replace=TRUE)  
+      omegab <- omega[omegab, ]
+      stat_h0[i] <- cond_MI(omegab, 1, 2, c_ind=3:ncol(omegab))
+    }
+    setTxtProgressBar(pb, i)
+  }
+  close(pb)
+  if(to_plot){
+    df <- data.frame(stat=stat_h0)
+    plot(ggplot(data=df, aes(x=stat)) + geom_histogram(alpha=0.5, position="identity", bins=30) + geom_vline(xintercept = stat) + ggtitle(paste("x=",xy_ind[1], "y=", xy_ind[2], " S=", c_ind))+theme(aspect.ratio=1/3))
+  }
+  p.value <- 1 - rank(c(stat, stat_h0))[1]/(length(stat_h0) + 1)
+}
