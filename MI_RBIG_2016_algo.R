@@ -114,13 +114,6 @@ sample_mi <- function(dat, x_ind, y_ind){
   dat
 }
 
-sample_cmi <- function(dat, x_ind, y_ind, c_ind, c_dist){
-  sdd <- sd(c(c_dist))
-  c_dist <- c_dist + rnorm(length(c_dist), sd=.1*sdd) 
-  P <- linear_permutation(c_dist)
-  dat <-  cbind(P%*%dat[, 1], dat[, 2:ncol(dat)])
-  dat
-}
 sample_cmi <- function(dat, x_ind, y_ind, c_ind){
   dat <- dat[,c(x_ind, y_ind, c_ind)]
   c_dist <- dist(dat[, 3:ncol(dat), drop=FALSE])
@@ -134,26 +127,30 @@ boot_mi <- function(dat, x_ind, y_ind, cond_MI=cond_MI_r){
   cond_MI(dat, 1, 2)
 } 
 
-boot_cmi <- function(dat, x_ind, y_ind, c_ind, c_dist, cond_MI=cond_MI_r){
-  dat <- sample_cmi(dat, x_ind, y_ind, c_ind, c_dist)  
-  cond_MI(dat, 1, 2, 3:ncol(dat))
-} 
 boot_cmi <- function(dat, x_ind, y_ind, c_ind, cond_MI=cond_MI_r){
   dat <- sample_cmi(dat, x_ind, y_ind, c_ind)  
   cond_MI(dat, 1, 2, 3:ncol(dat))
 } 
 
-nboot_cmi <- function(n,dat, x_ind, y_ind, c_ind=numeric(0), cond_MI=cond_MI_r){
-  pb <- txtProgressBar(min = 0, max = n, style = 3)
-  if(length(c_ind) == 0)
-    ans <- unlist(lapply(seq.int(n), function(i){setTxtProgressBar(pb, i); boot_mi(dat, x_ind, y_ind, cond_MI)}))
-  else{
-    c_dist <- dist(dat[, 3:ncol(dat), drop=FALSE])
-    ans <- unlist(lapply(seq.int(n), function(i){setTxtProgressBar(pb, i); boot_cmi(dat, x_ind, y_ind, c_ind, c_dist, cond_MI)}))
+rbig_sim <- function(rbig_fit, gdat=NULL){
+  ldat <- rbig_fit$ldat
+  lR <- rbig_fit$lR
+  if(is.null(gdat)){
+    gdat <- tail(ldat, 1)[[1]]
   }
-  close(pb)
-  ans
+  for(n in rev(seq_along(ldat)[-1])){
+    gdat <- gdat %*% solve(lR[[n-1]])
+    for(d in ncol(gdat):1){
+      gdat[, d] <- pnorm(gdat[, d])
+      gdat[, d] <- gdat[, d] / max(gdat[, d])
+      #       print(max(gdat[, d]))
+      #       hist(gdat[, d])
+      gdat[, d] <- quantile(ldat[[n-1]][, d], gdat[, d])
+    }
+  }
+  gdat
 }
+
 nboot_cmi <- function(n,dat, x_ind, y_ind, c_ind=numeric(0), cond_MI=cond_MI_r){
   pb <- txtProgressBar(min = 0, max = n, style = 3)
   if(length(c_ind) == 0)
